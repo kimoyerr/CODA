@@ -1,0 +1,138 @@
+---
+title: "Compositional Data Analysis"
+author: "Krishna Yerramsetty"
+date: "06/07/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+
+
+```
+
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(ggplot2)
+library(GGally)
+library(parallel)
+library(descriptr)
+library(summarytools)
+library(RColorBrewer)
+library(knitr)
+library(ggExtra)
+library(ggdendro)
+library(Ternary)
+
+
+st_options(bootstrap.css     = FALSE,       # Already part of the theme so no need for it
+           plain.ascii       = FALSE,       # One of the essential settings
+           style             = "rmarkdown", # Idem.
+           dfSummary.silent  = TRUE,        # Suppresses messages about temporary files
+           footnote          = NA,          # Keeping the results minimalistic
+           subtitle.emphasis = FALSE)       # For the vignette theme, this gives
+                                            # much better results. Your mileage may vary.
+```
+
+
+```{r}
+# Set ggplot global theme
+th <- theme_bw() + theme(text=element_text(size=20))
+```
+
+
+Ternary Plots
+```{r}
+par(mfrow=c(1, 1), mar=rep(0.3, 4))
+TernaryPlot('Steam', 'Ice', 'Water', 
+            grid.lines=5, grid.lty='dotted',
+            grid.minor.lines = 1, grid.minor.lty='dotted',
+            point='West')
+HorizontalGrid()
+middle_triangle <- matrix(c(
+  30, 40, 30,
+  30, 30, 40,
+  55, 20, 25
+), ncol=3, byrow=TRUE)
+TernaryPolygon(middle_triangle, col='#aaddfa', border='grey')
+TernaryLines(list(c(0, 100, 0), middle_triangle[1, ]), col='grey')
+TernaryLines(list(c(0, 0, 100), middle_triangle[2, ]), col='grey')
+TernaryLines(list(c(100, 0, 0), middle_triangle[3, ]), col='grey')
+```
+
+
+#Load absSimSeq data for 100 genes and 92 Spike-ins
+
+1. Scale Invariance
+```{r}
+load('sim_counts_matrix_100.rda')
+scaled.counts_matrix = counts_matrix %*% diag(c(1,1,5,5,1,1,5,5))
+colnames(scaled.counts_matrix) = colnames(counts_matrix)
+orig.dist <- dist(t(counts_matrix))
+scaled.dist <- dist(t(scaled.counts_matrix))
+
+orig.dendro <- as.dendrogram(hclust(d = dist(t(counts_matrix))))
+scaled.dendro <- as.dendrogram(hclust(d = dist(t(scaled.counts_matrix))))
+# Create dendro
+dendro.plot <- ggdendrogram(data = orig.dendro, rotate = TRUE)
+scaled.dendro.plot <- ggdendrogram(data = scaled.dendro, rotate = TRUE)
+
+# Preview the plot
+print(dendro.plot)
+print(scaled.dendro.plot)
+
+
+```
+
+
+2. Perturbation Invariance
+```{r}
+load('sim_counts_matrix_100.rda')
+perturbed.counts_matrix = counts_matrix * c(seq(1,192,1))
+colnames(perturbed.counts_matrix) = colnames(counts_matrix)
+orig.dist <- dist(t(counts_matrix))
+perturbed.dist <- dist(t(perturbed.counts_matrix))
+
+orig.dendro <- as.dendrogram(hclust(d = dist(t(counts_matrix))))
+perturbed.dendro <- as.dendrogram(hclust(d = dist(t(perturbed.counts_matrix))))
+# Create dendro
+dendro.plot <- ggdendrogram(data = orig.dendro, rotate = TRUE)
+perturbed.dendro.plot <- ggdendrogram(data = perturbed.dendro, rotate = TRUE)
+
+# Preview the plot
+print(dendro.plot)
+print(perturbed.dendro.plot)
+
+```
+
+3. Sub-compositional coherence
+```{r}
+load('sim_counts_matrix_100.rda')
+counts.all <- counts_matrix
+ # Load the sub-compositional data made up of only the first 50 genes (features) + 92 controls from the original data of 100 genes (features) + 92 controls
+load('sim_counts_matrix_50.rda')
+counts.sub.comp <- counts_matrix
+
+# Get the correlation between the 
+cor.all <- as.vector(cor(t(counts.all[1:50,])))
+cor.sub.comp <- as.vector(cor(t(counts.sub.comp[1:50,])))
+tmp <- as.data.frame(cbind(cor.all,cor.sub.comp))
+names(tmp) <- c('correlation_all', 'correlation_sub_comp')
+tmp$abs.diff <- as.factor(ifelse(abs(tmp$correlation_all - tmp$correlation_sub_comp)>0.5,1,0))
+
+ggplot(tmp,aes(correlation_all,correlation_sub_comp, color=abs.diff)) + geom_point(size=2) + th + scale_colour_manual(values = c("1" = "Red", "0" = "Blue")) + theme(legend.position = "none")
+```
+
+
+
+

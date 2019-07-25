@@ -1,0 +1,886 @@
+---
+title: "Compositional Data Analysis"
+author: "Krishna Yerramsetty"
+date: "06/07/2019"
+output:
+  html_document:
+    theme: united
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+
+
+```
+
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(ggplot2)
+library(GGally)
+library(parallel)
+library(descriptr)
+library(summarytools)
+library(RColorBrewer)
+library(knitr)
+library(ggExtra)
+library(ggdendro)
+library(Ternary)
+library(DESeq2)
+library(propr)
+library(plotly)
+
+
+
+st_options(bootstrap.css     = FALSE,       # Already part of the theme so no need for it
+           plain.ascii       = FALSE,       # One of the essential settings
+           style             = "rmarkdown", # Idem.
+           dfSummary.silent  = TRUE,        # Suppresses messages about temporary files
+           footnote          = NA,          # Keeping the results minimalistic
+           subtitle.emphasis = FALSE)       # For the vignette theme, this gives
+                                            # much better results. Your mileage may vary.
+```
+
+
+```{r}
+# Set ggplot global theme
+th <- theme_bw() + theme(text=element_text(size=20))
+scaleFUN <- function(x) sprintf("%.2f", x)
+```
+
+
+# Ternary Plots as Examples of Compositional Data
+```{r}
+par(mfrow=c(1, 1), mar=rep(0.3, 4))
+TernaryPlot('Steam', 'Ice', 'Water', 
+            grid.lines=5, grid.lty='dotted',
+            grid.minor.lines = 1, grid.minor.lty='dotted',
+            point='West')
+HorizontalGrid()
+middle_triangle <- matrix(c(
+  30, 40, 30,
+  30, 30, 40,
+  55, 20, 25
+), ncol=3, byrow=TRUE)
+TernaryPolygon(middle_triangle, col='#aaddfa', border='grey')
+TernaryLines(list(c(0, 100, 0), middle_triangle[1, ]), col='grey')
+TernaryLines(list(c(0, 0, 100), middle_triangle[2, ]), col='grey')
+TernaryLines(list(c(100, 0, 0), middle_triangle[3, ]), col='grey')
+```
+
+
+#Problems with Traditional Analysis Methods:  
+
+## A simple simulation with 3 variables
+In this example, the original data has 3 variables, where the first variable X has 2 groups of data seperated on the X-axis. Y and Z are just random variable. In the 3-d space, the data can be separated based on the X value. If we now close the data by dividing each point by the sum of the X,Y, and Z co-ordinates, the data become compositional and cannot be separated in the 3-d space anymore.  
+This example is from: Understanding sequencing data as compositions: an outlook and review. 2018. Quinn et al. https://academic.oup.com/bioinformatics/article/34/16/2870/4956011
+
+```{r}
+X <- c(rnorm(50,1,0.1), rnorm(50,5,1))
+Y <- rnorm(100,1,1)
+Z <-  rnorm(100,2,2)
+abs.data <- data.frame(cbind(X, Y, Z))
+abs.data$class <- c(rep(0,50), rep(1,50))
+rel.data <- abs.data
+rel.data[,1:3] <- abs.data[,1:3]/rowSums(abs.data[,1:3])
+
+#Plots
+plot_ly(x=abs.data$X, y=abs.data$Y, z=abs.data$Z, type="scatter3d", mode="markers", color=abs.data$class, alpha=.5)
+plot_ly(x=rel.data$X, y=rel.data$Y, z=rel.data$Z, type="scatter3d", mode="markers", color = rel.data$class, alpha=0.5)
+
+```
+
+##Load absSimSeq data for 100 genes and 92 Spike-ins  
+
+## 1. Scale Invariance:
+When I change the read depths of samples 1,2, 5 & 6 they cluster together even though the original true clustering is different
+```{r}
+load('sim_counts_matrix_100.rda')
+scaled.counts_matrix = counts_matrix %*% diag(c(1,1,5,5,1,1,5,5))
+colnames(scaled.counts_matrix) = colnames(counts_matrix)
+orig.dist <- dist(t(counts_matrix))
+scaled.dist <- dist(t(scaled.counts_matrix))
+
+orig.dendro <- as.dendrogram(hclust(d = dist(t(counts_matrix))))
+scaled.dendro <- as.dendrogram(hclust(d = dist(t(scaled.counts_matrix))))
+# Create dendro
+dendro.plot <- ggdendrogram(data = orig.dendro, rotate = TRUE)
+scaled.dendro.plot <- ggdendrogram(data = scaled.dendro, rotate = TRUE)
+
+# Preview the plot
+print(dendro.plot)
+print(scaled.dendro.plot)
+
+
+```
+
+
+## 2. Perturbation Invariance:
+Multiplying each gene by some constant does not change the clustering. This is good.
+```{r}
+load('sim_counts_matrix_100.rda')
+perturbed.counts_matrix = counts_matrix * c(seq(1,192,1))
+colnames(perturbed.counts_matrix) = colnames(counts_matrix)
+orig.dist <- dist(t(counts_matrix))
+perturbed.dist <- dist(t(perturbed.counts_matrix))
+
+orig.dendro <- as.dendrogram(hclust(d = dist(t(counts_matrix))))
+perturbed.dendro <- as.dendrogram(hclust(d = dist(t(perturbed.counts_matrix))))
+# Create dendro
+dendro.plot <- ggdendrogram(data = orig.dendro, rotate = TRUE)
+perturbed.dendro.plot <- ggdendrogram(data = perturbed.dendro, rotate = TRUE)
+
+# Preview the plot
+print(dendro.plot)
+print(perturbed.dendro.plot)
+
+```
+
+## 3. Sub-compositional coherence:
+When I only use a subset of 50 genes from the original 100 genes (all true fold changes are the same in the original set and the subset), the correlations between some genes change. This is problematic when we are trying to re-construct gene-regulatory networks, since we cannot guarantee that we will always sample all genes in a cell or pool of cells.
+```{r}
+load('sim_counts_matrix_100.rda')
+counts.all <- counts_matrix
+ # Load the sub-compositional data made up of only the first 50 genes (features) + 92 controls from the original data of 100 genes (features) + 92 controls
+load('sim_counts_matrix_50.rda')
+counts.sub.comp <- counts_matrix
+
+# Get the correlation between the 
+cor.all <- as.vector(cor(t(counts.all[1:50,])))
+cor.sub.comp <- as.vector(cor(t(counts.sub.comp[1:50,])))
+tmp <- as.data.frame(cbind(cor.all,cor.sub.comp))
+names(tmp) <- c('correlation_all', 'correlation_sub_comp')
+tmp$abs.diff <- as.factor(ifelse(abs(tmp$correlation_all - tmp$correlation_sub_comp)>0.5,1,0))
+
+ggplot(tmp,aes(correlation_all,correlation_sub_comp, color=abs.diff)) + geom_point(size=2) + th + scale_colour_manual(values = c("1" = "Red", "0" = "Blue")) + theme(legend.position = "none")
+```
+
+
+## 4. Differenttial Abundance:
+The traditional methods to determing the differential abundance (DA)  or differential expression (DE) are not suited when the changes are asymmterical (more genes enriched than depleted or vice-versa). 
+I show using simulations, the effect of different proporions of DA or DE genes on DESeq2 performance. Two different cases:  
+1. Symmetric: ~500% of the DE genes are depleted and ~50% of the DE genes are enriched  
+2. Asymmetric: ~90% of the DE genes are depleted and ~10% of the DE genes are enriched  
+
+```{r}
+scaleFUN <- function(x) sprintf("%.2f", x)
+#Symmetrical DE
+for (p in seq(0,1,0.1)){
+  # cat(p,'\n')
+  load(paste0(paste0('./genes_100/simulated_runs_100_equal_',p),paste0('/simulated_runs_100_equal_',p),'.RData'))
+  load(paste0(paste0('./genes_100/simulated_runs_100_equal_',p),'/run01/sim_counts_matrix.rda'))
+  read.mat <- counts_matrix[1:100,]
+  coldata <- data.frame(c(rep('control',4),rep('treatment',4)),row.names=colnames(read.mat))
+  colnames(coldata) <- 'condition'
+  
+  #DESeq
+  dds <- DESeqDataSetFromMatrix(countData = read.mat,
+                                colData = coldata,
+                                design = ~ condition)
+  #Filtering
+  keep <- rowSums(counts(dds)) >= 1
+  dds <- dds[keep,]
+  # Analysis
+  dds <- DESeq(dds)
+  res <- results(dds)
+  # summary(res)
+  res <- results(dds, name="condition_treatment_vs_control")
+  # summary(res)
+  deseq.degs <- res[which(res$padj < 0.05),]
+  
+  # Compare with truth
+  true.names <- names(sim_res$results[[1]]$abs_fold_changes)
+  true.degs <- data.frame(which(sim_res$results[[1]]$abs_fold_changes!=1))
+  colnames(true.degs) <- c('index')
+  true.degs$name <- true.names[true.degs$index]
+  # true.degs <- read.csv('run01_0.9_low_degs/true_degs_0.9_low.csv',header=T)
+  not.degs <- as.data.frame(setdiff(true.names,true.degs$name))
+  colnames(not.degs) <- 'name'
+  
+  sensitivity = sum(rownames(deseq.degs) %in% true.degs$name)/length(true.degs$name)
+  FPR = sum(rownames(deseq.degs) %in% not.degs$name)/length(not.degs$name)
+  
+  # Sign changes
+  deseq.down <- rownames(deseq.degs)[which(deseq.degs$log2FoldChange<0)]
+  deseq.up <- rownames(deseq.degs)[which(deseq.degs$log2FoldChange>0)]
+  true.down <- true.names[which(sim_res$results[[1]]$abs_fold_changes<1)]
+  true.up <- true.names[which(sim_res$results[[1]]$abs_fold_changes>1)]
+  up2down <- intersect(true.up, deseq.down)
+  down2up <- intersect(true.down, deseq.up)
+  cp.nums.cell <- sim_res$results[[1]]$copy_numbers_per_cell
+  
+  metrics.df <- data.frame(matrix(c(sensitivity, FPR, length(down2up), length(up2down)),nrow=1,ncol=4),row.names=p)
+  colnames(metrics.df) <- c('sensitivity','FPR','true_down_pred_up','true_up_pred_down')
+  metrics.df$DE_prop <- rownames(metrics.df)
+  if (file.exists('./genes_100/all_sim_metrics_equal.csv')){
+    write.table(metrics.df,file='./genes_100/all_sim_metrics_equal.csv',append=T,sep=',', col.names=F, row.names = F)
+  }else{
+    write.table(metrics.df,file='./genes_100/all_sim_metrics_equal.csv',append=F,sep=',', row.names = F)
+  }
+}
+tmp = read.csv('./genes_100/all_sim_metrics_equal.csv')
+ggplot(tmp,aes(DE_prop,sensitivity)) + geom_point(size=3, color='blue') + geom_smooth() + ylim(0,1)+ th + ggtitle('Symmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,FPR)) + geom_point(size=3, color='blue') + geom_smooth() + ylim(0,1)+ th+ ggtitle('Symmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,true_down_pred_up/100)) + geom_point(size=3, color='blue') + geom_smooth() + ylab('Prop (true_down_pred_up)') + th + ggtitle('Symmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,true_up_pred_down/100)) + geom_point(size=3, color='blue') + geom_smooth() + ylab('Prop (true_up_pred_down)') + th + ggtitle('Symmetric Differential Abundance')
+
+#Asymmetrical DE
+for (p in seq(0,0.9,0.1)){
+  # cat(p,'\n')
+  load(paste0(paste0('./genes_100/simulated_runs_100_0.9_decreasing_',p),paste0('/simulated_runs_100_0.9_decreasing_',p),'.RData'))
+  load(paste0(paste0('./genes_100/simulated_runs_100_0.9_decreasing_',p),'/run01/sim_counts_matrix.rda'))
+  read.mat <- counts_matrix[1:100,]
+  coldata <- data.frame(c(rep('control',4),rep('treatment',4)),row.names=colnames(read.mat))
+  colnames(coldata) <- 'condition'
+  
+  #DESeq
+  dds <- DESeqDataSetFromMatrix(countData = read.mat,
+                                colData = coldata,
+                                design = ~ condition)
+  #Filtering
+  keep <- rowSums(counts(dds)) >= 1
+  dds <- dds[keep,]
+  # Analysis
+  dds <- DESeq(dds)
+  res <- results(dds)
+  # summary(res)
+  res <- results(dds, name="condition_treatment_vs_control")
+  # summary(res)
+  deseq.degs <- res[which(res$padj < 0.05),]
+  
+  tmp = data.frame(cbind(res$baseMean, res$log2FoldChange, res$padj))
+  colnames(tmp) <- c('mean_norm_counts','LFC', 'padj')
+  # print(ggplot(tmp, aes(mean_norm_counts, LFC, , color=as.factor(padj<0.05))) +geom_point(size=3) + scale_x_continuous(trans='log', labels=scaleFUN) + geom_hline(yintercept = 0, linetype=3, size=2)  + th + theme(legend.position="bottom")) + ggtitle('DESeq Results: Asymmetric Differential Abundance')
+  
+  # Compare with truth
+  true.names <- names(sim_res$results[[1]]$abs_fold_changes)
+  true.degs <- data.frame(which(sim_res$results[[1]]$abs_fold_changes!=1))
+  colnames(true.degs) <- c('index')
+  true.degs$name <- true.names[true.degs$index]
+  # true.degs <- read.csv('run01_0.9_low_degs/true_degs_0.9_low.csv',header=T)
+  not.degs <- as.data.frame(setdiff(true.names,true.degs$name))
+  colnames(not.degs) <- 'name'
+  
+  sensitivity = sum(rownames(deseq.degs) %in% true.degs$name)/length(true.degs$name)
+  FPR = sum(rownames(deseq.degs) %in% not.degs$name)/length(not.degs$name)
+  
+  # Sign changes
+  deseq.down <- rownames(deseq.degs)[which(deseq.degs$log2FoldChange<0)]
+  deseq.up <- rownames(deseq.degs)[which(deseq.degs$log2FoldChange>0)]
+  true.down <- true.names[which(sim_res$results[[1]]$abs_fold_changes<1)]
+  true.up <- true.names[which(sim_res$results[[1]]$abs_fold_changes>1)]
+  up2down <- intersect(true.up, deseq.down)
+  down2up <- intersect(true.down, deseq.up)
+  cp.nums.cell <- sim_res$results[[1]]$copy_numbers_per_cell
+  
+  metrics.df <- data.frame(matrix(c(sensitivity, FPR, length(down2up), length(up2down)),nrow=1,ncol=4),row.names=p)
+  colnames(metrics.df) <- c('sensitivity','FPR','true_down_pred_up','true_up_pred_down')
+  metrics.df$DE_prop <- rownames(metrics.df)
+  if (file.exists('./genes_100/DESeq_sim_metrics_0.9_decreasing.csv')){
+    write.table(metrics.df,file='./genes_100/DESeq_sim_metrics_0.9_decreasing.csv',append=T,sep=',', col.names=F, row.names = F)
+  }else{
+    write.table(metrics.df,file='./genes_100/DESeq_sim_metrics_0.9_decreasing.csv',append=F,sep=',', row.names = F)
+  }
+  
+  # ALR TRansformation and Differential Proportionality 
+  # Use a spike-in gene
+  pos.ctrl <- which.max(rowSums(counts_matrix[101:192,]))
+  read.mat.alr <- read.mat %*% diag(1 / counts_matrix[pos.ctrl,]) 
+  # t.all <- apply(read.mat.alr,1,return(tryCatch(function(x)t.test(x[1:4],x[5:8])),error=function(e) NULL))
+  # mean.diff <- lapply(t.all,function(x)x$estimate[2]-x$estimate[1])
+  # p.val <- lapply(t.all,function(x)x$p.value)
+  get.base.mean <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$estimate[1], error=function(e) NA))
+  }
+  get.estimate <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$estimate[2]-t.test(df[1:4],df[5:8])$estimate[1], error=function(e) NA))
+  }
+  get.pval <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$p.value, error=function(e) NA))
+  }
+  mean.diff <- unlist(apply(read.mat.alr,1,get.estimate))
+  base.mean <- unlist(apply(read.mat.alr,1,get.base.mean))
+  p.val <- unlist(apply(read.mat.alr,1,get.pval))
+  p.val <- p.adjust(p.val,method='fdr')
+
+  alr.degs <- names(mean.diff)[which(p.val <0.05)]
+  alr.sensitivity = sum(alr.degs %in% true.degs$name)/length(true.degs$name)
+  alr.FPR = sum(alr.degs %in% not.degs$name)/length(not.degs$name)
+  alr.down <- names(mean.diff)[which(mean.diff <0 & p.val <0.05)]
+  alr.up <- names(mean.diff)[which(mean.diff >0 & p.val <0.05)]
+  alr.up2down <- intersect(true.up, alr.down)
+  alr.down2up <- intersect(true.down, alr.up)
+  
+  tmp = data.frame(cbind(base.mean, mean.diff, p.val))
+  colnames(tmp) <- c('mean_lr','mean_diff_lr', 'padj')
+  # print(ggplot(tmp, aes(mean_lr, mean_diff_lr , color=as.factor(padj<0.05))) +geom_point(size=3) + scale_x_continuous(trans='log', labels=scaleFUN) +  geom_hline(yintercept = 0, linetype=3, size=2)  + th + theme(legend.position="bottom"))
+  
+  metrics.df <- data.frame(matrix(c(alr.sensitivity, alr.FPR, length(alr.down2up), length(alr.up2down)),nrow=1,ncol=4),row.names=p)
+  colnames(metrics.df) <- c('sensitivity','FPR','true_down_pred_up','true_up_pred_down')
+  metrics.df$DE_prop <- rownames(metrics.df)
+  if (file.exists('./genes_100/spike_in_alr_sim_metrics_0.9_decreasing.csv')){
+    write.table(metrics.df,file='./genes_100/spike_in_alr_sim_metrics_0.9_decreasing.csv',append=T,sep=',', col.names=F, row.names = F)
+  }else{
+    write.table(metrics.df,file='./genes_100/spike_in_alr_sim_metrics_0.9_decreasing.csv',append=F,sep=',', row.names = F)
+  }
+  
+  # ALR TRansformation and Differential Proportionality 
+  # Use genes that has the highest and smallest difference across groups
+  pos.ctrl <- which.min((rowSums(read.mat[,1:4])-rowSums(read.mat[,5:8])))
+  neg.ctrl <- which.max((rowSums(read.mat[,1:4])-rowSums(read.mat[,5:8])))
+  read.mat.alr <- read.mat %*% diag(1 / counts_matrix[pos.ctrl,]) 
+  # t.all <- apply(read.mat.alr,1,return(tryCatch(function(x)t.test(x[1:4],x[5:8])),error=function(e) NULL))
+  # mean.diff <- lapply(t.all,function(x)x$estimate[2]-x$estimate[1])
+  # p.val <- lapply(t.all,function(x)x$p.value)
+  get.base.mean <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$estimate[1], error=function(e) NA))
+  }
+  get.estimate <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$estimate[2]-t.test(df[1:4],df[5:8])$estimate[1], error=function(e) NA))
+  }
+  get.pval <- function (df) {
+  return(tryCatch(t.test(df[1:4],df[5:8])$p.value, error=function(e) NA))
+  }
+  mean.diff <- unlist(apply(read.mat.alr,1,get.estimate))
+  base.mean <- unlist(apply(read.mat.alr,1,get.base.mean))
+  p.val <- unlist(apply(read.mat.alr,1,get.pval))
+  p.val <- p.adjust(p.val,method='fdr')
+
+  alr.degs <- names(mean.diff)[which(p.val <0.05)]
+  alr.sensitivity = sum(alr.degs %in% true.degs$name)/length(true.degs$name)
+  alr.FPR = sum(alr.degs %in% not.degs$name)/length(not.degs$name)
+  alr.down <- names(mean.diff)[which(mean.diff <0 & p.val <0.05)]
+  alr.up <- names(mean.diff)[which(mean.diff >0 & p.val <0.05)]
+  alr.up2down <- intersect(true.up, alr.down)
+  alr.down2up <- intersect(true.down, alr.up)
+  
+  tmp = data.frame(cbind(base.mean, mean.diff, p.val))
+  colnames(tmp) <- c('mean_lr','mean_diff_lr', 'padj')
+  # print(ggplot(tmp, aes(mean_lr, mean_diff_lr , color=as.factor(padj<0.05))) +geom_point(size=3) + scale_x_continuous(trans='log', labels=scaleFUN) +  geom_hline(yintercept = 0, linetype=3, size=2)  + th + theme(legend.position="bottom"))
+  
+  metrics.df <- data.frame(matrix(c(alr.sensitivity, alr.FPR, length(alr.down2up), length(alr.up2down)),nrow=1,ncol=4),row.names=p)
+  colnames(metrics.df) <- c('sensitivity','FPR','true_down_pred_up','true_up_pred_down')
+  metrics.df$DE_prop <- rownames(metrics.df)
+  if (file.exists('./genes_100/alr_sim_metrics_0.9_decreasing.csv')){
+    write.table(metrics.df,file='./genes_100/alr_sim_metrics_0.9_decreasing.csv',append=T,sep=',', col.names=F, row.names = F)
+  }else{
+    write.table(metrics.df,file='./genes_100/alr_sim_metrics_0.9_decreasing.csv',append=F,sep=',', row.names = F)
+  }
+  
+}
+tmp = read.csv('./genes_100/DESeq_sim_metrics_0.9_decreasing.csv')
+tmp2 = read.csv('./genes_100/alr_sim_metrics_0.9_decreasing.csv')
+tmp <- rbind(tmp,tmp2)
+tmp$method = as.factor(c(rep('DESeq2', 10), rep('ALR', 10)))
+ggplot(tmp,aes(DE_prop,sensitivity,group = method, color=method)) + geom_point(size=3) + geom_smooth() + ylim(0,1)+ th + theme(legend.position = 'bottom') + ggtitle('Asymmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,FPR, group = method, color=method)) + geom_point(size=3) + geom_smooth() + ylim(0,1)+ th + theme(legend.position = 'bottom') + ggtitle('Asymmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,true_down_pred_up/100, group = method, color=method)) + geom_point(size=3) + geom_smooth() + ylab('Prop (true_down_pred_up)') + th + theme(legend.position = 'bottom') + ggtitle('Asymmetric Differential Abundance')
+ggplot(tmp,aes(DE_prop,true_up_pred_down/100, group = method, color=method)) + geom_point(size=3) + geom_smooth() + ylab('Prop (true_up_pred_down)') + th + theme(legend.position = 'bottom') + ggtitle('Asymmetric Differential Abundance')
+
+```
+
+In the symmetric case, DESeq2 does well and the FPR, sensitivity, and sign-changes (denoted by 'true_up_pred_down' and 'true_down_pred_up') are as expected. 
+In the Asymmetric case however, DESeq2 sensitivity decreases significantly compared to the Symmetric case. The proportion of genes with sign change (tru_down_pred_up) is also as high as 17%. This is a major problem
+In contrast, using
+ALR Transformation: $\frac{counts\;of\;gene_{i}}{counts\;of\;gene_{ref}}$ and a simple t-test we reduce the number of sign changes, and the sensitivity is higher than DESeq2. The FPR rate of ~40% when DE_prop is 0.2 is an artifact of noise and small number of true 'hits'. 
+Better methods exist to lower the FPR even further. I will investigate these later.
+
+## 5. Effect of Other Genes in the Population:
+The next simulation will capture what happens to the individual gene counts that have the same true log fold change between control and experimental conditions, but the other genes are depleted/enriched. This happens all the time in selection conditions, where some genes are depleted and some are resistant or tolerant. The resistant genes confer an advantage of growth and these cells will grow and divide normally. The tolerant genes will tolerate the antibiotic or selection condition by probably not growing,so their cell numbers before and after selections could be the same (extreme condition when growth is completely suspended). 
+
+Here, I simulated data, where  
+5 genes have the true log fold change of 1 between control and experimental conditions (approximates tolerance or no growth under selection),  
+2 genes have the same true log fold change of > 1 in the experimental conditions (resistant and exhibiit growth under selection), and  
+2 genes have the same true log fold change of < 1 in the experimental conditions (not resistant or tolerant),   
+I simulated 5 different cases where different proportions of the reminaing 91 genes are changed. Of the genes that change, ~90% are depleted, and ~10% are enriched in each case.
+The depletion/enrichment of the other genes affects the tpm values and the read-depth normalized counts even though the total read depth is fixe at 200K reads
+
+```{r}
+# Print a table
+tmp = data.frame(c(0.1, 0.2, 0.4, 0.7, 0.9))
+colnames(tmp) <- 'frac_genes_changed'
+tmp$frac_depleted_of_changed_genes <- 0.9
+tmp$frac_enriched_of_changed_genes <- 0.1
+kable(tmp, caption = 'Simulated Cases', align='c')
+
+# Load the data
+true_copy_num <- list()
+rel_tpms = list()
+mean_read_counts = list()
+count =1
+for (dep in c(0.1, 0.2, 0.4, 0.7, 0.9)){
+  # cat(dep,'\n')
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/simulated_runs_100_',dep ,'_decreasing_0.9.RData'))
+  true_copy_num[[count]] <-sim_res$results[[1]]$copy_numbers_per_cell
+  rel_tpms[[count]] <-sim_res$results[[1]]$transcript_abundances
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/run01/sim_counts_matrix.rda'))
+  tmp <- data.frame(rowMeans(counts_matrix[,1:4]),rowMeans(counts_matrix[,5:8]))
+  colnames(tmp) <- c('ctr_counts','exp_counts')
+  mean_read_counts[[count]] <- tmp
+  count = count+1
+}
+all_counts <- cbind(do.call('rbind',mean_read_counts), do.call('rbind',true_copy_num))
+all_counts$gene = rep(rownames(mean_read_counts[[1]]),length(mean_read_counts))
+all_counts <- all_counts %>% mutate(exp_ctr_counts_ratio=exp_counts/ctr_counts) %>% 
+  mutate(exp_ctr_copy_numbers_ratio=exp_copy_numbers/ctr_copy_numbers)
+all_counts$frac_changed <- rep(c(0.1,0.2,0.4,0.7,0.9), each=nrow(sim_res$results[[1]]$copy_numbers_per_cell))
+
+#Get the constant genes
+const.genes <- all_counts  %>% filter(ctr_copy_numbers>0 & ctr_copy_numbers==exp_copy_numbers & !grepl('ERCC',gene)) %>% group_by(gene) %>% mutate(test=length(exp_copy_numbers)) %>% filter(test==length(mean_read_counts))
+const.genes <- unique(const.genes$gene)
+all_counts <- all_counts %>% mutate(change=ifelse(gene %in% const.genes,'const',NA))
+
+enrich.genes <- all_counts  %>% filter(ctr_copy_numbers>0 & ctr_copy_numbers<exp_copy_numbers & !grepl('ERCC',gene)) %>% group_by(gene) %>% mutate(test=length(exp_copy_numbers)) %>% filter(test==length(mean_read_counts))
+enrich.genes <- unique(enrich.genes$gene)
+all_counts[all_counts$gene %in% enrich.genes, 'change'] <- 'enriched'
+
+depleted.genes <- all_counts  %>% filter(ctr_copy_numbers>0 & ctr_copy_numbers>exp_copy_numbers & !grepl('ERCC',gene)) %>% group_by(gene) %>% mutate(test=length(exp_copy_numbers)) %>% filter(test==length(mean_read_counts))
+depleted.genes <- unique(depleted.genes$gene)
+all_counts[all_counts$gene %in% depleted.genes, 'change'] <- 'depleted'
+
+subset <- all_counts %>% filter(!is.na(change))
+ggplot(subset,aes(frac_changed, exp_ctr_counts_ratio, color = gene, shape = change)) + geom_point(size=4) + geom_smooth() + scale_y_continuous(trans='log') +  th + theme(legend.position = 'right') + 
+  geom_hline(yintercept = 1.5, linetype=2, color='gray20') + 
+  geom_hline(yintercept = 0.5,  linetype=2, color='gray20')
+```
+
+As can be seen from the plot above of the genes that have the same copy numbers across all samples, the ratio of exp vs ctr changes dramatically based on how the other genes in the population behave. I used arbitrary cutoffs of 0.5 and 1.5 on the log-scale for depletion and enrichment. The different genes are categorized as enriched or depleted (based on the arbitrary cut-offs) as we move across the x-axis even though their true fold-changes are fixed in all samples.
+
+To prevent this, lets use the ALR transformation with respect to a const gene and with respect to a spike-in:
+ALR Transformation: $\frac{counts\;of\;gene_{i}}{counts\;of\;gene_{ref}}$
+
+```{r}
+const.gene.denom <- const.genes[1]
+all_counts_ALR <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_counts_ALR_const_gene=ctr_counts/ctr_counts[gene==const.genes[1]],exp_counts_ALR_const_gene=exp_counts/exp_counts[gene==const.genes[1]])
+all_counts_ALR <- all_counts_ALR %>% mutate(exp_ctr_counts_diff_ALR_const_gene = exp_counts_ALR_const_gene - ctr_counts_ALR_const_gene)
+
+subset <- all_counts_ALR %>% filter(!is.na(change))
+ggplot(subset,aes(frac_changed, exp_ctr_counts_diff_ALR_const_gene, color = gene, shape = change)) + geom_point(size=4) + geom_smooth() + ylab('exp_ctr_diff_ALR_const_gene') + th + theme(legend.position = 'right')  + ggtitle('Using Constant Gene as Reference')
+
+spike <- 'ERCC_00002'
+all_counts_ALR_spike <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_counts_ALR_spike_gene=ctr_counts/ctr_counts[gene==spike],exp_counts_ALR_spike_gene=exp_counts/exp_counts[gene==spike])
+all_counts_ALR_spike <- all_counts_ALR_spike %>% mutate(exp_ctr_counts_diff_ALR_spike_gene = exp_counts_ALR_spike_gene - ctr_counts_ALR_spike_gene)
+
+subset <- all_counts_ALR_spike %>% filter(!is.na(change))
+ggplot(subset,aes(frac_changed, exp_ctr_counts_diff_ALR_spike_gene, color = gene, shape = change)) + geom_point(size=4) + geom_smooth()  + ylab('exp_ctr_diff_ALR_spiked_gene') + th + theme(legend.position = 'right') + ggtitle('Using Spike-in Gene as Reference')
+
+# enrich.gene.denom <- enrich.genes[2]
+# all_counts_ALR <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_counts_ALR_enrich_gene=ctr_counts/ctr_counts[gene==enrich.gene.denom],exp_counts_ALR_enrich_gene=exp_counts/exp_counts[gene==enrich.gene.denom])
+# all_counts_ALR <- all_counts_ALR %>% mutate(exp_ctr_counts_diff_ALR_enrich_gene = exp_counts_ALR_enrich_gene - ctr_counts_ALR_enrich_gene)
+# 
+# subset <- all_counts_ALR %>% filter(!is.na(change))
+# ggplot(subset,aes(frac_changed, exp_ctr_counts_diff_ALR_enrich_gene, color = gene, shape = change)) + geom_point(size=4) + geom_smooth()  +  th + theme(legend.position = 'right')
+# 
+# depleted.gene.denom <- depleted.genes[1]
+# all_counts_ALR <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_counts_ALR_depleted_gene=ctr_counts/ctr_counts[gene==depleted.gene.denom],exp_counts_ALR_depleted_gene=exp_counts/exp_counts[gene==depleted.gene.denom])
+# all_counts_ALR <- all_counts_ALR %>% mutate(exp_ctr_counts_diff_ALR_depleted_gene = exp_counts_ALR_depleted_gene - ctr_counts_ALR_depleted_gene)
+# 
+# subset <- all_counts_ALR %>% filter(!is.na(change))
+# ggplot(subset,aes(frac_changed, exp_ctr_counts_diff_ALR_depleted_gene, color = gene, shape = change)) + geom_point(size=4) + geom_smooth()  +  th + theme(legend.position = 'right')
+
+```
+
+We now see that either using:  
+1. a gene which we know has no fold change difference across conditions, or   
+2. a spike-in control which we spiked-in at equal concentrations in all conditons   
+as the reference gene, we estimate the same difference in ALR transformed data across conditions regardless of how the other genes change.   
+We can also use other genes which we know are truly enriched (positive controls) or depleted (negative controls) during selection. This makes the interpretation of the results tricky but definitely doable if we don't have constant genes or spike-ins.
+
+### Lets look at correlation across these samples:
+To see how things compare between relative counts and absolute counts.
+I calculated the correaltion for the non-constant genes across all the 5 samples (0.1, 0.2, 0.4, 0.6, 0.9 fraction of changed genes). I used both the true counts and relative counts using Polyester simulated count data at 20K read depth
+
+
+```{r}
+# Load the data
+true_copy_num <- list()
+rel_tpms = list()
+mean_read_counts = list()
+count =1
+for (dep in c(0.1, 0.2, 0.4, 0.7, 0.9)){
+  # cat(dep,'\n')
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/simulated_runs_100_',dep ,'_decreasing_0.9.RData'))
+  true_copy_num[[count]] <-sim_res$results[[1]]$copy_numbers_per_cell
+  rel_tpms[[count]] <-sim_res$results[[1]]$transcript_abundances
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/run01/sim_counts_matrix.rda'))
+  tmp <- data.frame(rowMeans(counts_matrix[,1:4]),rowMeans(counts_matrix[,5:8]))
+  colnames(tmp) <- c('ctr_counts','exp_counts')
+  mean_read_counts[[count]] <- tmp
+  count = count+1
+}
+all_counts <- data.frame(cbind(do.call('rbind',rel_tpms), do.call('rbind',true_copy_num)))
+colnames(all_counts) <- c('ctr_rel_tpms','exp_rel_tpms','ctr_copy_numbers', 'exp_copy_numbers')
+all_counts$gene = rep(rownames(rel_tpms[[1]]),length(rel_tpms))
+all_counts$frac_changed <- rep(c(0.1,0.2,0.4,0.7,0.9), each=nrow(sim_res$results[[1]]$copy_numbers_per_cell))
+
+subset <- all_counts
+# Get the correaltion of true counts
+subset.true.counts<- subset %>% select(exp_copy_numbers, gene, frac_changed) %>% spread(frac_changed, exp_copy_numbers)
+# Remove constant rows
+subset.true.counts <- subset.true.counts[apply(subset.true.counts, 1, var, na.rm=TRUE) != 0,]
+subset.true.cor <- as.vector(cor(t(subset.true.counts[,-1])))
+# hist(subset.true.cor)
+
+# Correlation of realtive counts
+subset.rel.counts<- subset %>% select(exp_rel_tpms, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms)
+subset.rel.counts <- subset.rel.counts %>% filter(gene %in% subset.true.counts$gene)
+subset.rel.cor <- as.vector(cor(t(subset.rel.counts[,-1])))
+# hist(subset.rel.cor)
+
+tmp <- as.data.frame(cbind(subset.true.cor, subset.rel.cor))
+colnames(tmp) <- c('true.cor.coeff','rel.cor.coeff')
+p <- ggplot(tmp,aes(true.cor.coeff, rel.cor.coeff)) + geom_point(size=1, color='blue') +  th + theme(legend.position = 'right') + ggtitle('Correlation: True vs Relative Counts') 
+print(ggMarginal(p, type='density', xparams = list(colour = "black", fill = "orange"), yparams = list(colour = "black", fill = "cyan")))
+```
+
+The negative bias is clear from the plot above where for some true correlation coefficients (R > 0.9), the relative correlation coefficients are negative. This is the result of the relative data being closed or constraiend because of the restriction on total read depth. The conclusions are the same regardless of the read depth used in the relative counts and is not due to uncertainity in count data due to limited read depth.
+
+
+
+  
+# Strategies for Compositional Data Analyses
+Two main strategies exist for treating Compositional Data and specifically NGS data:  
+1. Normalization to get back the absolute counts
+2. Compositional Data Analysis (CoDA) methods that transform the data using within sample references (Ex: ALR, CLR)
+Lets look at each of these in some detail.  
+  
+## Normalization to absolute counts
+This is the most widely used technique in NGS data pre-processing when comparing across samples is desired. The relative read counts are 'normalized' to the total read depth to 'recover' the absolute counts. This however does not recover the absolute counts when the total absolute amounts of RNA or cells or the amount of relevant biological material significantly changes across samples. This leads to erroneous comparisons across samples. Lets prove that to ourselves using our simulated data
+```{r}
+all_counts <- all_counts %>% mutate(exp_ctr_rel_tpms_ratio=exp_rel_tpms/ctr_rel_tpms) %>% 
+  mutate(exp_ctr_copy_numbers_ratio=exp_copy_numbers/ctr_copy_numbers)
+all_counts$frac_changed <- as.factor(all_counts$frac_changed)
+ggplot(all_counts,aes(exp_ctr_copy_numbers_ratio, exp_ctr_rel_tpms_ratio, group = frac_changed, color = frac_changed)) + geom_point() + geom_smooth() + scale_x_continuous(trans='log',labels=scaleFUN) + scale_y_continuous(trans='log',labels=scaleFUN) + geom_vline(xintercept=1, linetype=2, alpha=0.5) + 
+ ylab('LFC_read_depth_normalized') + xlab('True LFC') + th + theme(legend.position = 'bottom')
+```
+  
+So even though all the reads have the same total depth (sum), the log fold changes (LFCs) of genes calculated using the read depth normalized counts (RDN counts) are shifted compared to the true log fold changes. Interestingly, the direction of shift is not always predictable based on the fraction of genes changed. For example, when ~70% of the genes are changed, the LFCs caluclated using  using the RDN counts are shifted down compared to the true LFCs. On the other hand, the LFCs calculated using the RDN counts are shifted up compared to the true LFCs when 90% of the genes are changed. This is because the absolute true counts in the former case are higher than the latter case. In general, we cannot anticipate or estimate the true total absolute counts for a sample. 
+
+To truly correct for the change in the absolute counts, we need spike-in controls or genes that we add in to all our samples at the same abundance (amount) just before the sequencing step. Doing this will normalize all the samples to the same total abundance scale and makes the comparisons correct.  
+This only works when the data are closed due to sequencing (because we are adding the spike-ins just before sequencing), and will not help if the constraint is biological or happens upstream of the sequencing step. In that case we need to add in the spike-ins before this constraining step, but it is not always possible to do so due to physical and biological limitations of adding the spike-ins.  
+Lets see how this works using our data. In our data we have 92 different contsrol or spiked-in genes that have the true absolute abundance. Lets use these to 'normalize' the data and therefore bring all samples to the same absolute counts scale.
+
+```{r}
+spike <- 'ERCC_00002'
+all_counts <- all_counts %>% mutate(exp_ctr_rel_tpms_ratio=exp_rel_tpms/ctr_rel_tpms) %>% 
+  mutate(exp_ctr_copy_numbers_ratio=exp_copy_numbers/ctr_copy_numbers)
+
+all_counts_spike_norm <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_rel_tpms_spike_norm = ctr_rel_tpms/ctr_rel_tpms[gene==spike],exp_rel_tpms_spike_norm = exp_rel_tpms/exp_rel_tpms[gene==spike])
+
+all_counts_spike_norm <- all_counts_spike_norm %>% mutate(exp_ctr_rel_tpms_spike_norm_ratio=exp_rel_tpms_spike_norm/ctr_rel_tpms_spike_norm)
+
+ggplot(all_counts_spike_norm,aes(exp_ctr_copy_numbers_ratio, exp_ctr_rel_tpms_spike_norm_ratio, group = frac_changed, color = frac_changed)) + geom_point(alpha=0.3) + geom_jitter(width=0.1, height =0.1) + geom_smooth() + scale_x_continuous(trans='log',labels=scaleFUN) + scale_y_continuous(trans='log',labels=scaleFUN) + geom_vline(xintercept=1, linetype=2, alpha=0.5) + ylab('LFC_spike_normalized') + xlab('True LFC') + 
+  th + theme(legend.position = 'bottom')
+
+```
+
+The above plot has artifical jitter (noise) added to show all data, but the true data all lie along the diagonal. This indicates the power of spike-ins. Properly designed spike-ins can recover the absolute counts (upto a constant multiplicative factor), provided the spike-ins are added just before the step that leads to closure or constraints in the data, which is not always possible.  
+  
+Another point to note is nromalizing using spike-ins is exactly the same as using the Additive Log-Ratio (ALR) transformation. The benefit to using the general ALR transformation is that it is applicable even when we do not have spike-ins that have constant abundance across samples. The disadvantage with the general ALR transformation is we need to choose the reference properly to make sense of the data and answer the relevant questions.  
+Lets now look at the ALR transformation and other CoDA methods  
+
+Let's also see how the correlation between genes improves with spike-in normalization
+```{r}
+subset <- all_counts_spike_norm
+# Get the correaltion of true counts
+subset.true.counts<- subset %>% select(exp_copy_numbers, gene, frac_changed) %>% spread(frac_changed, exp_copy_numbers)
+# Remove constant rows
+subset.true.counts <- subset.true.counts[apply(subset.true.counts, 1, var, na.rm=TRUE) != 0,]
+subset.true.cor <- as.vector(cor(t(subset.true.counts[,-1])))
+# Correlation of spike-in normalized counts
+subset.spike.norm.counts<- subset %>% select(exp_rel_tpms_spike_norm, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms_spike_norm)
+subset.spike.norm.counts <- subset.spike.norm.counts %>% filter(gene %in% subset.true.counts$gene)
+subset.spike.norm.cor <- as.vector(cor(t(subset.spike.norm.counts[,-1])))
+
+tmp <- as.data.frame(cbind(subset.true.cor, subset.spike.norm.cor))
+colnames(tmp) <- c('true.cor.coeff','spike.normalized.cor.coeff')
+p <- ggplot(tmp,aes(true.cor.coeff, spike.normalized.cor.coeff)) + geom_point(size=1, color='blue') +  th + theme(legend.position = 'right') + ggtitle('Correlation: True vs Relative Counts') 
+print(ggMarginal(p, type='density', xparams = list(colour = "black", fill = "orange"), yparams = list(colour = "black", fill = "cyan")))
+```
+## CoDA methods:
+These are the methods proposed by John Aitchison originally in 1986. The core idea being that the log-ratio transformations of the components relative to another reference component can be treated as any other unconstrained data. This transforms the data from the original simplex space (as in our ternary diagram at the beginning of the report) to the Euclidean space. This allows us to use all classical analyses techniques on these data.  
+THESE TECHNIQUES DO NOT CLAIM TO OPEN THE DATA AS DO THE 'NORMALIZATION' METHODS FROM THE PREVIOUS SECTION!!  
+THESE TECHNIQUES ARE ALSO APPLICABLE TO ALL DATA: RELATIVE OR ABSOLUTE  
+
+# Proportionality
+Lets first calculate proportionality based metrics
+```{r}
+library(propr)
+# Load the data
+true_copy_num <- list()
+rel_tpms = list()
+mean_read_counts = list()
+count =1
+for (dep in c(0.1, 0.2, 0.4, 0.7, 0.9)){
+  # cat(dep,'\n')
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/simulated_runs_100_',dep ,'_decreasing_0.9.RData'))
+  true_copy_num[[count]] <-sim_res$results[[1]]$copy_numbers_per_cell
+  rel_tpms[[count]] <-sim_res$results[[1]]$transcript_abundances
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/run01/sim_counts_matrix.rda'))
+  tmp <- data.frame(rowMeans(counts_matrix[,1:4]),rowMeans(counts_matrix[,5:8]))
+  colnames(tmp) <- c('ctr_counts','exp_counts')
+  mean_read_counts[[count]] <- tmp
+  count = count+1
+}
+all_counts <- data.frame(cbind(do.call('rbind',rel_tpms), do.call('rbind',true_copy_num)))
+colnames(all_counts) <- c('ctr_rel_tpms','exp_rel_tpms','ctr_copy_numbers', 'exp_copy_numbers')
+all_counts$gene = rep(rownames(rel_tpms[[1]]),length(rel_tpms))
+all_counts$frac_changed <- rep(c(0.1,0.2,0.4,0.7,0.9), each=nrow(sim_res$results[[1]]$copy_numbers_per_cell))
+
+# Tue correlations
+spike <- c('ERCC_00002', 'ERCC_00003', 'ERCC_00004', 'ERCC_00009', 'ERCC_00012')
+# spike <- c('ERCC_00002')
+subset <- all_counts
+subset.true.counts <- subset %>% select(exp_copy_numbers, gene, frac_changed) %>% spread(frac_changed, exp_copy_numbers)
+subset.ref.true.counts <- subset.true.counts[subset.true.counts$gene %in% spike,]
+subset.true.counts <- subset.true.counts[apply(subset.true.counts, 1, var, na.rm=TRUE) != 0,]
+subset.true.cor <- as.vector(cor(t(subset.true.counts[,-1])))
+print(hist(subset.true.cor))
+
+# Spike-in normalized data
+all_counts_spike_norm <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_rel_tpms_spike_norm = ctr_rel_tpms/ctr_rel_tpms[gene==spike],exp_rel_tpms_spike_norm = exp_rel_tpms/exp_rel_tpms[gene==spike])
+# Relative correlations 
+subset.rel.counts <- all_counts_spike_norm %>% select(exp_rel_tpms_spike_norm, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms_spike_norm)
+subset.ref.counts <- subset.rel.counts[subset.rel.counts$gene==spike,]
+subset.rel.counts <- subset.rel.counts %>% filter(gene %in% subset.true.counts$gene)
+subset.rel.cor <- as.vector(cor(t(subset.rel.counts[,-1])))
+print(hist(subset.rel.cor))
+
+# Proportioanlity metrics
+# Add a spike-in for reference
+subset <- all_counts
+subset.rel.counts <- subset %>% select(exp_rel_tpms, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms)
+subset.ref.counts <- subset.rel.counts[subset.rel.counts$gene %in% spike,]
+subset.rel.counts <- subset.rel.counts %>% filter(gene %in% subset.true.counts$gene)
+
+subset.rel.counts <- rbind(subset.rel.counts, subset.ref.counts)
+phi <- propr(t(subset.rel.counts[,-1]), metric = "phi", symmetrize = TRUE)
+tmp <- rbind(subset.true.counts, subset.ref.true.counts)
+rho.abs <- propr(t(tmp[,-1]), metric = "rho", i=81, p=100, symmetrize = T)
+rho <- propr(t(subset.rel.counts[,-1]), metric = "rho", i=81, p=100, symmetrize = T)
+phis <- propr(t(subset.rel.counts[,-1]), metric = "phs", i=81)
+rel.cor <- corr(t(subset.rel.counts[,-1]))
+
+true.abs.cor <- cor(t(subset.true.counts[,-1]))
+print(plot(cor(t(subset.true.counts[,-1])), rho@matrix[1:80,1:80]))
+print(plot(cor(t(subset.true.counts[,-1])), rho.abs@matrix[1:80,1:80]))
+print(plot(cor(t(subset.true.counts[,-1])), rel.cor@matrix[1:80,1:80]))
+print(plot(cor(t(subset.true.counts[,-1])), 1-2*plogis(log(phis@matrix[1:80,1:80]))))
+
+#Nicer plots
+tmp <- as.data.frame(cbind(as.vector(true.abs.cor), as.vector(rho.abs@matrix[1:80,1:80])))
+colnames(tmp) <- c('True_correlation', 'rho_propr')
+ggplot(tmp, aes(True_correlation, rho_propr)) + geom_point(color='blue', size = 3) + th
+  
+# Genes with good variance show better correspondence between true correlation and proportionality based rho values
+good.var.genes <- which(apply(subset.true.counts[,-1],1,function(x)length(unique(x)))>4)
+sub.true.abs.cor <- true.abs.cor[rownames(true.abs.cor) %in% names(good.var.genes),colnames(true.abs.cor) %in% names(good.var.genes)]
+rho.true <- rho.abs@matrix
+sub.rho.true <- rho.true[rownames(rho.true) %in% names(good.var.genes),colnames(rho.true) %in% names(good.var.genes)]
+print(plot(sub.true.abs.cor, sub.rho.true))
+
+#Nicer plots
+tmp <- as.data.frame(cbind(as.vector(sub.true.abs.cor), as.vector(sub.rho.true)))
+colnames(tmp) <- c('True_correlation', 'rho_propr')
+ggplot(tmp, aes(True_correlation, rho_propr)) + geom_point(color='blue', size = 3) + th
+
+table("Observed" = llt(rho.abs@matrix[1:80,1:80]) > .85,
+"Actual" = llt(cor(t(subset.true.counts[,-1]))) > .95)
+
+```
+
+
+
+As can be seen from these plots, using proportionality we can capture most of the original correlations. Of course, this is a contrived example, where I treat the spike-in corrected data as relative data, even though using spike-ins will recover the original absolute counts. Even with this, contrived example, we still see some differences between the true correlations and the proportionality values calcualted using the spike-in normalized counts. This is due to the way the the proportionality based metrics are calulated which makes them extremely sensitive to the estimates of the variances of the log-transformed values. Here we only have 5 samples to calculate the variances and in most cases, the first 3 samples have the same values. This I suspect leads to the formulae to calculate the metrics to break down. Have to think about this a little bit more. The evidence for this hypothesis is that, if we only look for components that have different values in at least 4 different samples, then the correlation values and the proportionality metrics match pretty well.
+
+Now that we have seen how the proportionality metrics perform on spike-in normalized data, lets see how these metrics perform when we don't have the luxury of spike-ins in our data.
+
+```{r}
+subset <- all_counts
+# True counts
+subset.true.counts <- subset %>% select(exp_copy_numbers, gene, frac_changed) %>% spread(frac_changed, exp_copy_numbers)
+subset.ref.true.counts <- subset.true.counts[subset.true.counts$gene %in% spike,]
+subset.true.counts <- subset.true.counts[apply(subset.true.counts, 1, var, na.rm=TRUE) != 0,]
+subset.true.cor <- as.vector(cor(t(subset.true.counts[,-1])))
+true.abs.cor <- cor(t(subset.true.counts[,-1]))
+
+# Relative tpm values
+subset.rel.counts <- subset %>% select(exp_rel_tpms, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms)
+subset.ref.counts <- subset.rel.counts[subset.rel.counts$gene %in% spike,]
+subset.rel.counts <- subset.rel.counts %>% filter(gene %in% subset.true.counts$gene)
+
+# Calculate the proportionality metrics
+rho <- propr(t(subset.rel.counts[,-1]), metric = "rho", i=1)
+print(plot(true.abs.cor, rho@matrix[1:80,1:80]))
+
+# Nicer plots
+tmp <- as.data.frame(cbind(as.vector(true.abs.cor), as.vector(rho@matrix[1:80,1:80])))
+colnames(tmp) <- c('True_correlation', 'rho_propr_relative')
+ggplot(tmp, aes(True_correlation, rho_propr_relative)) + geom_point(color='blue', size = 3, alpha =1) + th
+
+# Calculate the proportionality metrics
+rho <- propr(t(subset.rel.counts[,-1]), metric = "rho", i=27)
+print(plot(true.abs.cor, rho@matrix[1:80,1:80]))
+
+# Nicer plots
+tmp <- as.data.frame(cbind(as.vector(true.abs.cor), as.vector(rho@matrix[1:80,1:80])))
+colnames(tmp) <- c('True_correlation', 'rho_propr_relative')
+ggplot(tmp, aes(True_correlation, rho_propr_relative)) + geom_point(color='blue', size = 3, alpha =1) + th
+  
+
+table("Observed" = llt(rho@matrix[1:80,1:80]) > .95,
+"Actual" = llt(cor(t(subset.true.counts[,-1]))) > .95)
+
+# Calculate the proportionality metrics
+rho <- propr(t(subset.rel.counts[,-1]), metric = "rho", i=2)
+print(plot(true.abs.cor, rho@matrix[1:80,1:80]))
+
+table("Observed" = llt(rho@matrix[1:80,1:80]) > .95,
+"Actual" = llt(cor(t(subset.true.counts[,-1]))) > .95)
+```
+
+We see above that the relationship between the true correlation on absolute counts and rho values changes depending on what denominator we use for the ALR. This is expected since there is no reason for the ALR to corresopond to the true correlations on the absolute counts. There is no way we can recover the true correlations on the absolute counts, if we don't have an unchanging reference or spike-in. A good mathematical explanation for this can be found in "How should we measure proportionality on relative gene expression data?" by Erb and Notredame in "Theory in Biosciences, June 2016, Volume 135, Issue 1-2, pp 21-36"
+
+Instead, lets compare the rho values for relative data (with respect to a chosen reference gene) against the correlations between true relative counts for all genes against this reference gene. A possible example where this could be useful is in pathway analyses, where we have one reference gene in the pathway, and we want to understand which other genes are correlated in terms of their counts with respect to this reference gene. Is this even an application? WOuld anyone be interested in this? Not sure
+
+```{r}
+subset <- all_counts
+# True counts
+subset.true.counts <- subset %>% select(exp_copy_numbers, gene, frac_changed) %>% spread(frac_changed, exp_copy_numbers)
+subset.ref.true.counts <- subset.true.counts[subset.true.counts$gene %in% spike,]
+subset.true.counts <- subset.true.counts[apply(subset.true.counts, 1, var, na.rm=TRUE) != 0,]
+
+true.abs.cor <- as.vector(cor(t(subset.true.counts[,-1])))
+true.abs.cor.mat <- cor(t(subset.true.counts[,-1]))
+
+reference.gene <- 46
+subset.true.counts.ref <- subset.true.counts
+tmp <- apply(subset.true.counts[,-1], 1, function(x)x/subset.true.counts[reference.gene,-1])
+tmp <- do.call("rbind", tmp)
+subset.true.counts.ref[,-1] <- tmp
+true.rel.cor <- as.vector(cor(t(subset.true.counts.ref[,-1])))
+true.rel.cor.mat <- cor(t(subset.true.counts.ref[,-1]))
+
+# Nice plot
+tmp <- as.data.frame(cbind(as.vector(true.abs.cor.mat), as.vector(true.rel.cor.mat)))
+colnames(tmp) <- c('True_correlation_absolute', 'True_correlation_relative')
+ggplot(tmp, aes(True_correlation_absolute, True_correlation_relative)) + geom_point(color='blue', size = 3, alpha =1) + th
+
+# Relative tpm values
+subset.rel.counts <- subset %>% select(exp_rel_tpms, gene, frac_changed) %>% spread(frac_changed, exp_rel_tpms)
+subset.rel.counts <- subset.rel.counts %>% filter(gene %in% subset.true.counts.ref$gene)
+rownames(subset.rel.counts) <- rownames(subset.true.counts.ref)
+
+# Calculate the proportionality metrics
+rho <- propr(t(subset.rel.counts[,-1]), metric = "rho", i=reference.gene)
+print(plot(true.rel.cor.mat, rho@matrix[1:80,1:80]))
+
+#Nicer plots
+tmp <- as.data.frame(cbind(as.vector(true.rel.cor.mat), as.vector(rho@matrix[1:80,1:80])))
+colnames(tmp) <- c('True_correlation_relative', 'rho_propr_relative')
+ggplot(tmp, aes(True_correlation_relative, rho_propr_relative)) + geom_point(color='blue', size = 3, alpha =1) + th
+  
+
+table("Observed" = llt(rho@matrix[1:80,1:80]) > .9,
+"Actual" = llt(cor(t(subset.true.counts[,-1]))) > .95)
+
+# Genes with good variance show better correspondence between true correlation and proportionality based rho values
+good.var.genes <- which(apply(subset.true.counts.ref[,-1],1,function(x)length(unique(x)))>4)
+sub.true.rel.cor <- true.rel.cor.mat[rownames(true.rel.cor.mat) %in% names(good.var.genes),colnames(true.rel.cor.mat) %in% names(good.var.genes)]
+rho.true <- rho@matrix
+sub.rho.true <- rho.true[rownames(rho.true) %in% names(good.var.genes),colnames(rho.true) %in% names(good.var.genes)]
+print(plot(sub.true.rel.cor, sub.rho.true))
+
+#Nicer plots
+tmp <- as.data.frame(cbind(as.vector(sub.true.rel.cor), as.vector(sub.rho.true)))
+colnames(tmp) <- c('True_correlation_relative', 'rho_propr_relative')
+ggplot(tmp, aes(True_correlation_relative, rho_propr_relative)) + geom_point(color='blue', size = 3) + th
+```
+
+
+# Differential Abundance usign Ranks
+
+```{r}
+# Load the data
+true_copy_num <- list()
+rel_tpms = list()
+mean_read_counts = list()
+count =1
+for (dep in c(0.1, 0.2, 0.4, 0.7, 0.9)){
+  # cat(dep,'\n')
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/simulated_runs_100_',dep ,'_decreasing_0.9.RData'))
+  true_copy_num[[count]] <-sim_res$results[[1]]$copy_numbers_per_cell
+  rel_tpms[[count]] <-sim_res$results[[1]]$transcript_abundances
+  load(file=paste0('./cut_model_simulations/simulated_runs_100_',dep ,'_decreasing_0.9/run01/sim_counts_matrix.rda'))
+  tmp <- data.frame(rowMeans(counts_matrix[,1:4]),rowMeans(counts_matrix[,5:8]))
+  colnames(tmp) <- c('ctr_counts','exp_counts')
+  mean_read_counts[[count]] <- tmp
+  count = count+1
+}
+all_counts <- data.frame(cbind(do.call('rbind',rel_tpms), do.call('rbind',true_copy_num)))
+colnames(all_counts) <- c('ctr_rel_tpms','exp_rel_tpms','ctr_copy_numbers', 'exp_copy_numbers')
+all_counts$gene = rep(rownames(rel_tpms[[1]]),length(rel_tpms))
+all_counts$frac_changed <- as.factor(rep(c(0.1,0.2,0.4,0.7,0.9), each=nrow(sim_res$results[[1]]$copy_numbers_per_cell)))
+
+# Remove ERCC spike-in genes for simplicity
+all_counts <- all_counts[grep('ERCC',all_counts$gene, invert=T),]
+
+
+# Lets use a randomly selected gene as the reference to measure the Differential Ranks
+# Make sure to select a gene which has differnet true absolute copy numbers across control and treatemen (exp) samples
+reference <- all_counts[which(all_counts$ctr_copy_numbers != all_counts$exp_copy_numbers)[3],'gene']
+all_counts <- all_counts %>% mutate(exp_ctr_rel_tpms_ratio=exp_rel_tpms/ctr_rel_tpms) %>% 
+  mutate(exp_ctr_copy_numbers_ratio=exp_copy_numbers/ctr_copy_numbers)
+
+all_counts_ref <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_rel_tpms_ref = (ctr_rel_tpms/ctr_rel_tpms[gene==reference]),exp_rel_tpms_ref= (exp_rel_tpms/exp_rel_tpms[gene==reference]))
+
+all_counts_ref <- all_counts_ref %>% mutate(exp_ctr_rel_tpms_ref_ratio=exp_rel_tpms_ref/ctr_rel_tpms_ref)
+
+ggplot(all_counts_ref,aes(exp_ctr_copy_numbers_ratio, exp_ctr_rel_tpms_ref_ratio, group = frac_changed, color = frac_changed)) + geom_point(alpha=0.3) + geom_jitter(width=0.1, height =0.1) + geom_smooth() + scale_x_continuous(trans='log',labels=scaleFUN) + scale_y_continuous(trans='log',labels=scaleFUN) + geom_vline(xintercept=1, linetype=2, alpha=0.5) + ylab('Differrential_Ranking_Relative') + xlab('Differrential_Ranking_Absolute') + 
+  th + theme(legend.position = 'bottom')
+
+# Look at  each condition separately
+all_counts_ref_0.9 <- all_counts_ref[all_counts_ref$frac_changed==0.9,]
+ggplot(all_counts_ref_0.9,aes(exp_ctr_copy_numbers_ratio, exp_ctr_rel_tpms_ref_ratio)) + geom_point( color='blue', size=3)  + geom_smooth() + scale_x_continuous(trans='log',labels=scaleFUN) + scale_y_continuous(trans='log',labels=scaleFUN) +  ylab('Δ(log-ratio)_Relative') + xlab('Δ(log-ratio)_Absolute') + 
+  th + theme(legend.position = 'bottom')
+max.changed <- which.max(all_counts_ref_0.9$exp_ctr_rel_tpms_ref_ratio)
+min.changed <- which.min(all_counts_ref_0.9$exp_ctr_rel_tpms_ref_ratio)
+
+# Calculate differentials with respcet to these extreme ranked genes as references
+reference <- as.character(all_counts_ref_0.9[max.changed,'gene'])
+all_counts_ref_max <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_rel_tpms_ref = ctr_rel_tpms/ctr_rel_tpms[gene==reference],exp_rel_tpms_ref= exp_rel_tpms/exp_rel_tpms[gene==reference])
+
+all_counts_ref_max <- all_counts_ref_max %>% mutate(exp_ctr_rel_tpms_ref_ratio=exp_rel_tpms_ref/ctr_rel_tpms_ref)
+all_counts_ref_max_0.9 <- all_counts_ref_max[all_counts_ref_max$frac_changed==0.9,]
+
+reference <- as.character(all_counts_ref_0.9[min.changed,'gene'])
+all_counts_ref_min <- all_counts %>% group_by(frac_changed) %>% mutate(ctr_rel_tpms_ref = ctr_rel_tpms/ctr_rel_tpms[gene==reference],exp_rel_tpms_ref= exp_rel_tpms/exp_rel_tpms[gene==reference])
+
+all_counts_ref_min <- all_counts_ref_min %>% mutate(exp_ctr_rel_tpms_ref_ratio=exp_rel_tpms_ref/ctr_rel_tpms_ref)
+all_counts_ref_min_0.9 <- all_counts_ref_min[all_counts_ref_max$frac_changed==0.9,]
+
+# Histogram of effect sizes with respect to the highest and lowest ranking genes
+ggplot(all_counts_ref_max_0.9,aes(exp_ctr_rel_tpms_ref_ratio)) + geom_histogram() + xlab('Δ(log-ratio)') + th
+ggplot(all_counts_ref_min_0.9,aes(exp_ctr_rel_tpms_ref_ratio)) + geom_histogram() + xlab('Δ(log-ratio)') + th
+```
+
+
+
+
+
+
+
+
+
